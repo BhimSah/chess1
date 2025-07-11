@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
 import 'dart:math';
+import 'chessboard.dart';
+import 'dart:convert';
+import 'package:shared_preferences/shared_preferences.dart';
+
 
 class User {
   final String username;
@@ -343,10 +347,20 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-class GameModeSelection extends StatelessWidget {
+enum AILevel { easy, medium, hard }
+
+class GameModeSelection extends StatefulWidget {
   final User user;
   
   const GameModeSelection({super.key, required this.user});
+
+  @override
+  State<GameModeSelection> createState() => _GameModeSelectionState();
+}
+
+class _GameModeSelectionState extends State<GameModeSelection> {
+  AILevel selectedAILevel = AILevel.medium;
+  GameMode? selectedGameMode;
 
   @override
   Widget build(BuildContext context) {
@@ -366,6 +380,16 @@ class GameModeSelection extends StatelessWidget {
               );
             },
             tooltip: 'Logout',
+          ),
+          IconButton(
+            icon: const Icon(Icons.history),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => GameHistoryScreen()),
+              );
+            },
+            tooltip: 'Game History',
           ),
         ],
       ),
@@ -388,7 +412,7 @@ class GameModeSelection extends StatelessWidget {
                     CircleAvatar(
                       backgroundColor: Colors.brown[700],
                       child: Text(
-                        user.username[0].toUpperCase(),
+                        widget.user.username[0].toUpperCase(),
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
@@ -401,7 +425,7 @@ class GameModeSelection extends StatelessWidget {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Welcome, ${user.username}!',
+                            'Welcome, ${widget.user.username}!',
                             style: TextStyle(
                               fontSize: 18,
                               fontWeight: FontWeight.bold,
@@ -409,7 +433,7 @@ class GameModeSelection extends StatelessWidget {
                             ),
                           ),
                           Text(
-                            user.email,
+                            widget.user.email,
                             style: TextStyle(
                               color: Colors.brown[600],
                               fontSize: 14,
@@ -424,12 +448,12 @@ class GameModeSelection extends StatelessWidget {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceAround,
                   children: [
-                    _buildStatItem('Games', user.gamesplayed.toString()),
-                    _buildStatItem('Wins', user.gameswon.toString()),
-                    _buildStatItem('Losses', user.gameslost.toString()),
+                    _buildStatItem('Games', widget.user.gamesplayed.toString()),
+                    _buildStatItem('Wins', widget.user.gameswon.toString()),
+                    _buildStatItem('Losses', widget.user.gameslost.toString()),
                     _buildStatItem('Win Rate', 
-                      user.gamesplayed > 0 
-                        ? '${((user.gameswon / user.gamesplayed) * 100).round()}%'
+                      widget.user.gamesplayed > 0 
+                        ? '${((widget.user.gameswon / widget.user.gamesplayed) * 100).round()}%'
                         : '0%'
                     ),
                   ],
@@ -437,7 +461,6 @@ class GameModeSelection extends StatelessWidget {
               ],
             ),
           ),
-          
           // Game mode selection
           Expanded(
             child: Center(
@@ -467,7 +490,41 @@ class GameModeSelection extends StatelessWidget {
                     'Play against the computer',
                     Icons.computer,
                     GameMode.humanVsAI,
+                    aiLevel: selectedAILevel,
                   ),
+                 if (selectedGameMode == GameMode.humanVsAI) ...[
+                   const SizedBox(height: 16),
+                   Row(
+                     mainAxisAlignment: MainAxisAlignment.center,
+                     children: [
+                       const Text('AI Level: '),
+                       DropdownButton<AILevel>(
+                         value: selectedAILevel,
+                         items: const [
+                           DropdownMenuItem(
+                             value: AILevel.easy,
+                             child: Text('Easy'),
+                           ),
+                           DropdownMenuItem(
+                             value: AILevel.medium,
+                             child: Text('Medium'),
+                           ),
+                           DropdownMenuItem(
+                             value: AILevel.hard,
+                             child: Text('Hard'),
+                           ),
+                         ],
+                         onChanged: (level) {
+                           if (level != null) {
+                             setState(() {
+                               selectedAILevel = level;
+                             });
+                           }
+                         },
+                       ),
+                     ],
+                   ),
+                 ],
                 ],
               ),
             ),
@@ -483,15 +540,23 @@ class GameModeSelection extends StatelessWidget {
     String subtitle,
     IconData icon,
     GameMode gameMode,
+    {AILevel? aiLevel},
   ) {
     return Container(
       width: 300,
       child: ElevatedButton(
         onPressed: () {
+          setState(() {
+            selectedGameMode = gameMode;
+          });
           Navigator.push(
             context,
             MaterialPageRoute(
-              builder: (context) => ChessGame(gameMode: gameMode, user: user),
+              builder: (context) => ChessGame(
+                gameMode: gameMode,
+                user: widget.user,
+                aiLevel: aiLevel ?? AILevel.medium,
+              ),
             ),
           );
         },
@@ -556,8 +621,9 @@ class GameModeSelection extends StatelessWidget {
 class ChessGame extends StatefulWidget {
   final GameMode gameMode;
   final User user;
+  final AILevel aiLevel;
   
-  const ChessGame({super.key, required this.gameMode, required this.user});
+  const ChessGame({super.key, required this.gameMode, required this.user, this.aiLevel = AILevel.medium});
 
   @override
   State<ChessGame> createState() => _ChessGameState();
@@ -573,10 +639,16 @@ class _ChessGameState extends State<ChessGame> {
   bool isAITurn = false;
   bool isCheck = false;
   bool isCheckmate = false;
+  ChessBoardTheme currentTheme = ChessBoardTheme.classic;
+  bool showCoordinates = true;
+  List<int>? lastMoveFrom;
+  List<int>? lastMoveTo;
+  List<String> moveHistory = [];
 
   @override
   void initState() {
     super.initState();
+    aiLevel = widget.aiLevel;
     initializeBoard();
   }
 
@@ -640,6 +712,13 @@ class _ChessGameState extends State<ChessGame> {
 
     if (fromRow == -1) return;
 
+    // Track last move
+    setState(() {
+      lastMoveFrom = [fromRow, fromCol];
+      lastMoveTo = [toRow, toCol];
+      moveHistory.add(_moveToAlgebraic(fromRow, fromCol, toRow, toCol));
+    });
+
     // Move the piece
     board[toRow][toCol] = selectedPiece;
     board[fromRow][fromCol] = null;
@@ -666,6 +745,7 @@ class _ChessGameState extends State<ChessGame> {
         gameOver = true;
         gameStatus = '${isWhiteTurn ? 'Black' : 'White'} wins by checkmate!';
         _updateGameStats(isWhiteTurn);
+        _saveGameHistory(isWhiteTurn ? 'White' : 'Black');
       } else if (nextPlayerInCheck) {
         gameStatus = '${isWhiteTurn ? 'Black' : 'White'} is in check!';
       } else {
@@ -694,6 +774,13 @@ class _ChessGameState extends State<ChessGame> {
         final toRow = aiMove[2];
         final toCol = aiMove[3];
 
+        // Track last move
+        setState(() {
+          lastMoveFrom = [fromRow, fromCol];
+          lastMoveTo = [toRow, toCol];
+          moveHistory.add(_moveToAlgebraic(fromRow, fromCol, toRow, toCol));
+        });
+
         // Move the AI piece
         final piece = board[fromRow][fromCol];
         board[toRow][toCol] = piece;
@@ -718,6 +805,7 @@ class _ChessGameState extends State<ChessGame> {
             gameOver = true;
             gameStatus = 'Black wins by checkmate!';
             _updateGameStats(false);
+            _saveGameHistory('Black');
           } else if (nextPlayerInCheck) {
             gameStatus = 'White is in check!';
           } else {
@@ -729,65 +817,214 @@ class _ChessGameState extends State<ChessGame> {
   }
 
   List<int>? _getBestMove() {
-    List<List<int>> allMoves = [];
-    
-    // Find all possible moves for AI (black pieces)
+    // Easy: random move
+    if (aiLevel == AILevel.easy) {
+      List<List<int>> allMoves = [];
+      for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+          final piece = board[row][col];
+          if (piece != null && !piece.isWhite) {
+            final moves = getValidMovesWithCheckValidation(row, col);
+            for (final move in moves) {
+              allMoves.add([row, col, move[0], move[1]]);
+            }
+          }
+        }
+      }
+      if (allMoves.isEmpty) return null;
+      return allMoves[Random().nextInt(allMoves.length)];
+    }
+    // Medium: minimax depth 2, Hard: depth 4
+    int depth = aiLevel == AILevel.hard ? 4 : 2;
+    int bestScore = -99999;
+    List<int>? bestMove;
     for (int row = 0; row < 8; row++) {
       for (int col = 0; col < 8; col++) {
         final piece = board[row][col];
         if (piece != null && !piece.isWhite) {
           final moves = getValidMovesWithCheckValidation(row, col);
           for (final move in moves) {
-            allMoves.add([row, col, move[0], move[1]]);
+            // Simulate move
+            final captured = board[move[0]][move[1]];
+            final fromPiece = board[row][col];
+            board[move[0]][move[1]] = fromPiece;
+            board[row][col] = null;
+            // Pawn promotion
+            bool promoted = false;
+            if (fromPiece!.type == PieceType.pawn && move[0] == 7) {
+              board[move[0]][move[1]] = ChessPiece(type: PieceType.queen, isWhite: false);
+              promoted = true;
+            }
+            int score = _minimax(depth, true, -100000, 100000, 0);
+            // Undo move
+            board[row][col] = fromPiece;
+            board[move[0]][move[1]] = captured;
+            if (promoted) {
+              // revert to pawn if promoted
+              board[move[0]][move[1]] = captured;
+            }
+            if (score > bestScore) {
+              bestScore = score;
+              bestMove = [row, col, move[0], move[1]];
+            }
           }
         }
       }
     }
-
-    if (allMoves.isEmpty) return null;
-
-    // Simple AI: prioritize captures and center control
-    List<int> bestMove = allMoves[0];
-    int bestScore = -1000;
-
-    for (final move in allMoves) {
-      int score = _evaluateMove(move);
-      if (score > bestScore) {
-        bestScore = score;
-        bestMove = move;
-      }
-    }
-
     return bestMove;
   }
 
-  int _evaluateMove(List<int> move) {
+  // Minimax with alpha-beta pruning and mate-in-N scoring
+  int _minimax(int depth, bool isWhiteTurn, int alpha, int beta, int ply) {
+    if (depth == 0) {
+      return aiLevel == AILevel.hard ? _evaluateBoardAdvanced() : _evaluateBoard();
+    }
+    if (isWhiteTurn) {
+      int maxEval = -1000000;
+      for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+          final piece = board[row][col];
+          if (piece != null && piece.isWhite) {
+            final moves = getValidMovesWithCheckValidation(row, col);
+            for (final move in moves) {
+              final captured = board[move[0]][move[1]];
+              final fromPiece = board[row][col];
+              board[move[0]][move[1]] = fromPiece;
+              board[row][col] = null;
+              // Pawn promotion
+              bool promoted = false;
+              if (fromPiece!.type == PieceType.pawn && move[0] == 0) {
+                board[move[0]][move[1]] = ChessPiece(type: PieceType.queen, isWhite: true);
+                promoted = true;
+              }
+              // Check for checkmate after move
+              bool isMate = isInCheckmate(false);
+              int eval;
+              if (isMate) {
+                eval = 1000000 - ply; // Sooner mate is better
+              } else {
+                eval = _minimax(depth - 1, false, alpha, beta, ply + 1);
+              }
+              board[row][col] = fromPiece;
+              board[move[0]][move[1]] = captured;
+              if (promoted) {
+                board[move[0]][move[1]] = captured;
+              }
+              maxEval = maxEval > eval ? maxEval : eval;
+              alpha = alpha > eval ? alpha : eval;
+              if (beta <= alpha) break;
+            }
+          }
+        }
+      }
+      return maxEval;
+    } else {
+      int minEval = 1000000;
+      for (int row = 0; row < 8; row++) {
+        for (int col = 0; col < 8; col++) {
+          final piece = board[row][col];
+          if (piece != null && !piece.isWhite) {
+            final moves = getValidMovesWithCheckValidation(row, col);
+            for (final move in moves) {
+              final captured = board[move[0]][move[1]];
+              final fromPiece = board[row][col];
+              board[move[0]][move[1]] = fromPiece;
+              board[row][col] = null;
+              // Pawn promotion
+              bool promoted = false;
+              if (fromPiece!.type == PieceType.pawn && move[0] == 7) {
+                board[move[0]][move[1]] = ChessPiece(type: PieceType.queen, isWhite: false);
+                promoted = true;
+              }
+              // Check for checkmate after move
+              bool isMate = isInCheckmate(true);
+              int eval;
+              if (isMate) {
+                eval = -1000000 + ply; // Sooner mate is better
+              } else {
+                eval = _minimax(depth - 1, true, alpha, beta, ply + 1);
+              }
+              board[row][col] = fromPiece;
+              board[move[0]][move[1]] = captured;
+              if (promoted) {
+                board[move[0]][move[1]] = captured;
+              }
+              minEval = minEval < eval ? minEval : eval;
+              beta = beta < eval ? beta : eval;
+              if (beta <= alpha) break;
+            }
+          }
+        }
+      }
+      return minEval;
+    }
+  }
+
+  // Board evaluation: material + piece-square tables
+  int _evaluateBoard() {
     int score = 0;
-    final fromRow = move[0];
-    final fromCol = move[1];
-    final toRow = move[2];
-    final toCol = move[3];
-    final piece = board[fromRow][fromCol];
-    final targetPiece = board[toRow][toCol];
-
-    // Capture bonus
-    if (targetPiece != null) {
-      score += _getPieceValue(targetPiece.type) * 10;
+    for (int row = 0; row < 8; row++) {
+      for (int col = 0; col < 8; col++) {
+        final piece = board[row][col];
+        if (piece != null) {
+          int value = _getPieceValue(piece.type);
+          // Add simple piece-square bonus for pawns/knights/queens
+          if (piece.type == PieceType.pawn) {
+            value += piece.isWhite ? (6 - row) : (row - 1);
+          } else if (piece.type == PieceType.knight) {
+            value += [3, 4, 4, 5, 5, 4, 4, 3][col];
+          } else if (piece.type == PieceType.queen) {
+            value += 1;
+          }
+          score += piece.isWhite ? value : -value;
+        }
+      }
     }
+    return score;
+  }
 
-    // Center control bonus
-    if (toRow >= 3 && toRow <= 4 && toCol >= 3 && toCol <= 4) {
-      score += 2;
+  // Advanced evaluation for hard level: material, piece-square, king safety, mobility
+  int _evaluateBoardAdvanced() {
+    int score = 0;
+    int whiteMobility = 0;
+    int blackMobility = 0;
+    int whiteCenter = 0;
+    int blackCenter = 0;
+    for (int row = 0; row < 8; row++) {
+      for (int col = 0; col < 8; col++) {
+        final piece = board[row][col];
+        if (piece != null) {
+          int value = _getPieceValue(piece.type);
+          // Piece-square bonus
+          if (piece.type == PieceType.pawn) {
+            value += piece.isWhite ? (6 - row) : (row - 1);
+          } else if (piece.type == PieceType.knight) {
+            value += [3, 4, 4, 5, 5, 4, 4, 3][col];
+          } else if (piece.type == PieceType.queen) {
+            value += 1;
+          }
+          // King safety: bonus if king is castled (on g/h or b/c columns)
+          if (piece.type == PieceType.king) {
+            if (piece.isWhite && (col == 6 || col == 7 || col == 1 || col == 2)) value += 5;
+            if (!piece.isWhite && (col == 6 || col == 7 || col == 1 || col == 2)) value -= 5;
+          }
+          // Center control bonus
+          if (row >= 2 && row <= 5 && col >= 2 && col <= 5) {
+            if (piece.isWhite) whiteCenter++;
+            else blackCenter++;
+          }
+          score += piece.isWhite ? value : -value;
+          // Mobility
+          if (piece.isWhite) {
+            whiteMobility += getValidMovesWithCheckValidation(row, col).length;
+          } else {
+            blackMobility += getValidMovesWithCheckValidation(row, col).length;
+          }
+        }
+      }
     }
-
-    // Pawn advancement bonus
-    if (piece!.type == PieceType.pawn) {
-      score += (7 - toRow); // Closer to promotion = higher score
-    }
-
-    // Random factor to avoid predictable moves
-    score += Random().nextInt(5);
-
+    score += (whiteMobility - blackMobility);
+    score += 2 * (whiteCenter - blackCenter);
     return score;
   }
 
@@ -1094,6 +1331,29 @@ class _ChessGameState extends State<ChessGame> {
       isAITurn = false;
       isCheck = false;
       isCheckmate = false;
+      lastMoveFrom = null;
+      lastMoveTo = null;
+      moveHistory.clear();
+    });
+  }
+
+  void _showThemeSelectionDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => ThemeSelectionDialog(
+        currentTheme: currentTheme,
+        onThemeChanged: (theme) {
+          setState(() {
+            currentTheme = theme;
+          });
+        },
+      ),
+    );
+  }
+
+  void _toggleCoordinates() {
+    setState(() {
+      showCoordinates = !showCoordinates;
     });
   }
 
@@ -1142,6 +1402,32 @@ class _ChessGameState extends State<ChessGame> {
     );
   }
 
+  String _moveToAlgebraic(int fromRow, int fromCol, int toRow, int toCol) {
+    String colName(int col) => String.fromCharCode(97 + col); // a-h
+    return '${colName(fromCol)}${8 - fromRow}${colName(toCol)}${8 - toRow}';
+  }
+
+  Future<void> _saveGameHistory(String winner) async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> history = prefs.getStringList('game_history') ?? [];
+    final entry = GameHistoryEntry(
+      moves: List<String>.from(moveHistory),
+      playerWhite: widget.user.username,
+      playerBlack: widget.gameMode == GameMode.humanVsAI ? 'AI' : 'Player 2',
+      result: winner,
+      mode: widget.gameMode == GameMode.humanVsAI ? 'Human vs AI' : 'Human vs Human',
+      date: DateTime.now(),
+    );
+    history.add(jsonEncode(entry.toJson()));
+    await prefs.setStringList('game_history', history);
+  }
+
+  Future<List<GameHistoryEntry>> loadGameHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> history = prefs.getStringList('game_history') ?? [];
+    return history.map((e) => GameHistoryEntry.fromJson(jsonDecode(e))).toList();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -1154,6 +1440,16 @@ class _ChessGameState extends State<ChessGame> {
         backgroundColor: Colors.brown[700],
         foregroundColor: Colors.white,
         actions: [
+          IconButton(
+            icon: Icon(showCoordinates ? Icons.grid_4x4 : Icons.grid_3x3),
+            onPressed: _toggleCoordinates,
+            tooltip: 'Toggle Coordinates',
+          ),
+          IconButton(
+            icon: const Icon(Icons.palette),
+            onPressed: _showThemeSelectionDialog,
+            tooltip: 'Change Theme',
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: resetGame,
@@ -1204,53 +1500,18 @@ class _ChessGameState extends State<ChessGame> {
           ),
           Expanded(
             child: Center(
-              child: Container(
-                margin: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  border: Border.all(color: Colors.brown[700]!, width: 3),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: GridView.builder(
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 8,
-                  ),
-                  itemCount: 64,
-                  itemBuilder: (context, index) {
-                    int row = index ~/ 8;
-                    int col = index % 8;
-                    bool isLightSquare = (row + col) % 2 == 0;
-                    bool isSelected = selectedPiece == board[row][col];
-                    bool isMoveValid = isValidMove(row, col);
-
-                    return GestureDetector(
-                      onTap: () {
-                        print('Tapped: row=$row, col=$col, piece=${board[row][col]?.type.name}');
-                        selectPiece(row, col);
-                      },
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: isSelected
-                              ? Colors.yellow[300]
-                              : isMoveValid
-                                  ? Colors.green[300]
-                                  : isLightSquare
-                                      ? Colors.brown[100]
-                                      : Colors.brown[600],
-                          border: isSelected
-                              ? Border.all(color: Colors.orange, width: 3)
-                              : null,
-                        ),
-                        child: Center(
-                          child: board[row][col] != null
-                              ? ChessPieceWidget(piece: board[row][col]!)
-                              : null,
-                        ),
-                      ),
-                    );
-                  },
-                ),
+              child: ChessBoard(
+                board: board,
+                selectedPiece: selectedPiece,
+                validMoves: validMoves,
+                onSquareTapped: (row, col) {
+                  print('Tapped: row= [0m$row, col=$col, piece=${board[row][col]?.type.name}');
+                  selectPiece(row, col);
+                },
+                theme: currentTheme,
+                showCoordinates: showCoordinates,
+                lastMoveFrom: lastMoveFrom,
+                lastMoveTo: lastMoveTo,
               ),
             ),
           ),
@@ -1260,63 +1521,159 @@ class _ChessGameState extends State<ChessGame> {
   }
 }
 
-class ChessPiece {
-  final PieceType type;
-  final bool isWhite;
+// Model for game history
+class GameHistoryEntry {
+  final List<String> moves;
+  final String playerWhite;
+  final String playerBlack;
+  final String result; // 'White', 'Black', 'Draw'
+  final String mode; // 'Human vs Human' or 'Human vs AI'
+  final DateTime date;
 
-  ChessPiece({required this.type, required this.isWhite});
+  GameHistoryEntry({
+    required this.moves,
+    required this.playerWhite,
+    required this.playerBlack,
+    required this.result,
+    required this.mode,
+    required this.date,
+  });
+
+  Map<String, dynamic> toJson() => {
+    'moves': moves,
+    'playerWhite': playerWhite,
+    'playerBlack': playerBlack,
+    'result': result,
+    'mode': mode,
+    'date': date.toIso8601String(),
+  };
+
+  static GameHistoryEntry fromJson(Map<String, dynamic> json) => GameHistoryEntry(
+    moves: List<String>.from(json['moves'] ?? []),
+    playerWhite: json['playerWhite'] ?? '',
+    playerBlack: json['playerBlack'] ?? '',
+    result: json['result'] ?? '',
+    mode: json['mode'] ?? '',
+    date: DateTime.parse(json['date'] ?? DateTime.now().toIso8601String()),
+  );
 }
 
-enum PieceType {
-  pawn,
-  rook,
-  knight,
-  bishop,
-  queen,
-  king,
+class GameHistoryScreen extends StatefulWidget {
+  const GameHistoryScreen({super.key});
+
+  @override
+  State<GameHistoryScreen> createState() => _GameHistoryScreenState();
 }
 
-class ChessPieceWidget extends StatelessWidget {
-  final ChessPiece piece;
+class _GameHistoryScreenState extends State<GameHistoryScreen> {
+  late Future<List<GameHistoryEntry>> _historyFuture;
 
-  const ChessPieceWidget({super.key, required this.piece});
+  @override
+  void initState() {
+    super.initState();
+    _historyFuture = _loadHistory();
+  }
+
+  Future<List<GameHistoryEntry>> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final List<String> history = prefs.getStringList('game_history') ?? [];
+    return history.map((e) => GameHistoryEntry.fromJson(jsonDecode(e))).toList().reversed.toList();
+  }
+
+  Future<void> _clearHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('game_history');
+    setState(() {
+      _historyFuture = _loadHistory();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    String symbol = _getPieceSymbol();
-    Color color = piece.isWhite ? Colors.white : Colors.black;
-    
-    return Text(
-      symbol,
-      style: TextStyle(
-        fontSize: 32,
-        color: color,
-        fontWeight: FontWeight.bold,
-        shadows: [
-          Shadow(
-            offset: const Offset(1, 1),
-            blurRadius: 2,
-            color: Colors.grey.withValues(alpha: 0.5),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Game History'),
+        backgroundColor: Colors.brown[700],
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.delete),
+            onPressed: () async {
+              final confirm = await showDialog<bool>(
+                context: context,
+                builder: (context) => AlertDialog(
+                  title: const Text('Clear History'),
+                  content: const Text('Are you sure you want to clear all game history?'),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, false),
+                      child: const Text('Cancel'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.pop(context, true),
+                      child: const Text('Clear'),
+                    ),
+                  ],
+                ),
+              );
+              if (confirm == true) {
+                await _clearHistory();
+              }
+            },
+            tooltip: 'Clear History',
           ),
         ],
       ),
+      body: FutureBuilder<List<GameHistoryEntry>>(
+        future: _historyFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          final history = snapshot.data ?? [];
+          if (history.isEmpty) {
+            return const Center(child: Text('No games played yet.'));
+          }
+          return ListView.builder(
+            itemCount: history.length,
+            itemBuilder: (context, index) {
+              final entry = history[index];
+              return Card(
+                margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            '${entry.mode}',
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                          Text(
+                            '${entry.date.toLocal().toString().split(".")[0]}',
+                            style: const TextStyle(color: Colors.grey, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text('White: ${entry.playerWhite}'),
+                      Text('Black: ${entry.playerBlack}'),
+                      Text('Result: ${entry.result}'),
+                      const SizedBox(height: 8),
+                      Text('Moves: ${entry.moves.join(", ")}', style: const TextStyle(fontSize: 12)),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
     );
   }
-
-  String _getPieceSymbol() {
-    switch (piece.type) {
-      case PieceType.king:
-        return piece.isWhite ? '♔' : '♚';
-      case PieceType.queen:
-        return piece.isWhite ? '♕' : '♛';
-      case PieceType.rook:
-        return piece.isWhite ? '♖' : '♜';
-      case PieceType.bishop:
-        return piece.isWhite ? '♗' : '♝';
-      case PieceType.knight:
-        return piece.isWhite ? '♘' : '♞';
-      case PieceType.pawn:
-        return piece.isWhite ? '♙' : '♟';
-    }
-  }
 }
+
+
